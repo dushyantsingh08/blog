@@ -15,7 +15,9 @@ const BLOG_DIR = path.join(process.cwd(), "blogs");
 export interface BlogPost {
   slug: string;
   title: string;
+  listTitle?: string;
   description?: string;
+  listDescription?: string;
   date: string;
   tags?: string[];
   published?: boolean;
@@ -26,7 +28,9 @@ export interface BlogPost {
 export interface BlogPostMeta {
   slug: string;
   title: string;
+  listTitle?: string;
   description?: string;
+  listDescription?: string;
   date: string;
   tags?: string[];
 }
@@ -73,8 +77,8 @@ export function getAllSlug() : string[]{
   }
    const filenames = fs.readdirSync(BLOG_DIR)
    const slugs  = filenames
-   .filter((filename : string)=> filename.endsWith(".md"))
-   .map((filename)=>filename.replace(/\.md/,""));
+   .filter((filename : string)=> filename.endsWith(".md") || filename.endsWith(".mdx"))
+   .map((filename)=>filename.replace(/\.mdx?$/,""));
 
    const seen = new Set<string>
    for(const slug of slugs){
@@ -102,9 +106,12 @@ async function markdownToHTML(markdown:string) : Promise<string> {
 }
 
 export async function getPostBySlug(slug:string) : Promise<BlogPost | null> {
-    const fullpath = path.join(BLOG_DIR , `${slug}.md`)
+    let fullpath = path.join(BLOG_DIR , `${slug}.md`)
     if(!fs.existsSync(fullpath)){
-        return null
+        fullpath = path.join(BLOG_DIR, `${slug}.mdx`);
+        if(!fs.existsSync(fullpath)) {
+            return null
+        }
     }
     const filecontent = fs.readFileSync(fullpath , "utf8");
     const {data , content} = matter(filecontent)
@@ -115,7 +122,9 @@ export async function getPostBySlug(slug:string) : Promise<BlogPost | null> {
     return {
     slug,
     title: data.title as string,
+    listTitle: data.listTitle as string | undefined,
     description: data.description as string | undefined,
+    listDescription: data.listDescription as string | undefined,
     date: data.date as string,
     tags: data.tags as string[] | undefined,
     published: data.published !== false, // default to true
@@ -148,10 +157,12 @@ export async function getallpost() : Promise<BlogPost []> {
 export async function getallpostMeta() : Promise<BlogPostMeta[]> {
     const posts = await getallpost();
 
-    return posts.map(({ slug, title, description, date, tags }) => ({
+    return posts.map(({ slug, title, listTitle, description, listDescription, date, tags }) => ({
     slug,
     title,
+    listTitle,
     description,
+    listDescription,
     date,
     tags,
   }));
