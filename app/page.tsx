@@ -59,11 +59,10 @@ export default async function Home() {
                   <p className="max-w-3xl text-sm leading-relaxed text-zinc-500 transition-colors group-hover:text-zinc-400 md:text-base">
                     {post.listDescription || post.description}
                   </p>
-                  
+
                 )}
               </div>
 
-              {/* Bottom Right "Read More" Area */}
               <div className="absolute bottom-6 right-6 flex items-center gap-2 text-zinc-600 transition-colors group-hover:text-orange-500">
                 <span className="hidden text-[10px] font-bold uppercase tracking-widest md:inline-block">
                   Read
@@ -91,6 +90,7 @@ export default async function Home() {
             </div>
           )}
         </div>
+
 
         <div className="mt-20 flex justify-center">
           <Link
