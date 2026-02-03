@@ -24,7 +24,7 @@ export async function generateMetadata({
     }
 
     return {
-        title: `${post.title} |  dushyant singh`,
+        title: `${post.title} |  Dushyant Singh `,
         description: post.description,
     };
 }

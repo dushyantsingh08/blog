@@ -59,6 +59,7 @@ export default async function Home() {
                   <p className="max-w-3xl text-sm leading-relaxed text-zinc-500 transition-colors group-hover:text-zinc-400 md:text-base">
                     {post.listDescription || post.description}
                   </p>
+                  
                 )}
               </div>
 
