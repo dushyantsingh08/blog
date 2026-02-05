@@ -1,0 +1,514 @@
+---
+title: "SOLID Principles: The Architecture of Maintainable Code"
+date: "2026-02-05"
+description: "An in-depth exploration of SOLID principles with real-world examples, code demonstrations, and the mathematical reasoning behind software design decisions."
+tags: ["Software Design", "SOLID", "Architecture", "Best Practices"]
+published: true
+---
+
+## SOLID Principles: The Architecture of Maintainable Code
+
+Software deteriorates not because of time, but because of change. Every new feature, every bug fix, every refactor introduces potential fragility. The **SOLID principles**, introduced by Robert C. Martin, are five design guidelines that create systems resistant to decay.
+
+These are not abstract theory. They are battle-tested patterns that distinguish codebases that scale gracefully from those that collapse under their own weight.
+
+---
+
+## S — Single Responsibility Principle (SRP)
+
+### The Core Idea
+**A class should have one, and only one, reason to change.**
+
+This principle stems from the observation that every responsibility is an axis of change. When a class handles multiple concerns, modifications to one concern can inadvertently break another.
+
+### The Mathematical Intuition
+If we consider a class with $n$ responsibilities, and each responsibility has a probability $p$ of requiring change, the probability that the class needs modification is:
+
+$$ P_{change} = 1 - (1-p)^n $$
+
+As $n$ increases, $P_{change}$ approaches 1 exponentially. More responsibilities mean more reasons to touch the code.
+
+### Bad Example: Multiple Responsibilities
+
+```typescript
+class UserManager {
+  // Responsibility 1: Data persistence
+  saveToDatabase(user: User): void {
+    const query = `INSERT INTO users VALUES (${user.id}, '${user.email}')`;
+    database.execute(query);
+  }
+
+  // Responsibility 2: Email notifications
+  sendWelcomeEmail(user: User): void {
+    const emailBody = `Welcome ${user.name}!`;
+    emailService.send(user.email, "Welcome", emailBody);
+  }
+
+  // Responsibility 3: Password validation
+  validatePassword(password: string): boolean {
+    return password.length >= 8 && /[A-Z]/.test(password);
+  }
+}
+```
+
+**Problem**: Changes to email templates, database schemas, or password rules all require modifying the same class.
+
+### Good Example: Single Responsibilities
+
+```typescript
+class UserRepository {
+  save(user: User): void {
+    const query = `INSERT INTO users VALUES (?, ?)`;
+    database.execute(query, [user.id, user.email]);
+  }
+
+  findById(id: string): User | null {
+    return database.query(`SELECT * FROM users WHERE id = ?`, [id]);
+  }
+}
+
+class EmailNotificationService {
+  sendWelcomeEmail(user: User): void {
+    const template = this.templateEngine.render("welcome", { name: user.name });
+    this.emailProvider.send(user.email, "Welcome", template);
+  }
+}
+
+class PasswordValidator {
+  private readonly minLength = 8;
+  private readonly requiresUppercase = true;
+
+  validate(password: string): ValidationResult {
+    const errors: string[] = [];
+    
+    if (password.length < this.minLength) {
+      errors.push(`Password must be at least ${this.minLength} characters`);
+    }
+    
+    if (this.requiresUppercase && !/[A-Z]/.test(password)) {
+      errors.push("Password must contain an uppercase letter");
+    }
+    
+    return {
+      isValid: errors.length === 0,
+      errors
+    };
+  }
+}
+```
+
+**Benefit**: Each class has a single, well-defined purpose. Changes are isolated.
+
+---
+
+## O — Open/Closed Principle (OCP)
+
+### The Core Idea
+**Software entities should be open for extension, but closed for modification.**
+
+You should be able to add new functionality without changing existing code. This is achieved through abstraction and polymorphism.
+
+### The Cost of Modification
+Every time you modify existing code, you risk introducing bugs. If $C$ is the cost of introducing a bug and $p$ is the probability of a bug per modification, the expected cost of $n$ modifications is:
+
+$$ E[Cost] = n \times p \times C $$
+
+By extending rather than modifying, we keep $n$ low.
+
+### Bad Example: Conditional Logic
+
+```typescript
+class PaymentProcessor {
+  processPayment(amount: number, method: string): void {
+    if (method === "credit_card") {
+      // Credit card processing logic
+      console.log(`Processing $${amount} via credit card`);
+      this.chargeCreditCard(amount);
+    } else if (method === "paypal") {
+      // PayPal processing logic
+      console.log(`Processing $${amount} via PayPal`);
+      this.chargePayPal(amount);
+    } else if (method === "crypto") {
+      // Cryptocurrency processing logic
+      console.log(`Processing $${amount} via crypto`);
+      this.chargeCrypto(amount);
+    }
+  }
+}
+```
+
+**Problem**: Adding a new payment method requires modifying the `processPayment` method.
+
+### Good Example: Extension Through Abstraction
+
+```typescript
+interface PaymentMethod {
+  charge(amount: number): Promise<PaymentResult>;
+  getName(): string;
+}
+
+class CreditCardPayment implements PaymentMethod {
+  constructor(private cardNumber: string, private cvv: string) {}
+
+  async charge(amount: number): Promise<PaymentResult> {
+    console.log(`Charging $${amount} to card ending in ${this.cardNumber.slice(-4)}`);
+    // Credit card API call
+    return { success: true, transactionId: "cc_" + Date.now() };
+  }
+
+  getName(): string {
+    return "Credit Card";
+  }
+}
+
+class PayPalPayment implements PaymentMethod {
+  constructor(private email: string) {}
+
+  async charge(amount: number): Promise<PaymentResult> {
+    console.log(`Charging $${amount} to PayPal account ${this.email}`);
+    // PayPal API call
+    return { success: true, transactionId: "pp_" + Date.now() };
+  }
+
+  getName(): string {
+    return "PayPal";
+  }
+}
+
+class CryptoPayment implements PaymentMethod {
+  constructor(private walletAddress: string) {}
+
+  async charge(amount: number): Promise<PaymentResult> {
+    console.log(`Charging $${amount} to wallet ${this.walletAddress}`);
+    // Blockchain transaction
+    return { success: true, transactionId: "crypto_" + Date.now() };
+  }
+
+  getName(): string {
+    return "Cryptocurrency";
+  }
+}
+
+class PaymentProcessor {
+  async processPayment(amount: number, method: PaymentMethod): Promise<void> {
+    console.log(`Processing payment via ${method.getName()}`);
+    const result = await method.charge(amount);
+    
+    if (result.success) {
+      console.log(`Payment successful: ${result.transactionId}`);
+    }
+  }
+}
+```
+
+**Benefit**: New payment methods can be added without touching `PaymentProcessor`.
+
+---
+
+## L — Liskov Substitution Principle (LSP)
+
+### The Core Idea
+**Objects of a superclass should be replaceable with objects of a subclass without breaking the application.**
+
+This principle ensures that inheritance hierarchies are logically sound. Subtypes must honor the contracts established by their parent types.
+
+### The Formal Definition
+If $S$ is a subtype of $T$, then objects of type $T$ may be replaced with objects of type $S$ without altering any of the desirable properties of the program.
+
+### Bad Example: Violating Behavioral Contracts
+
+```typescript
+class Rectangle {
+  constructor(protected width: number, protected height: number) {}
+
+  setWidth(width: number): void {
+    this.width = width;
+  }
+
+  setHeight(height: number): void {
+    this.height = height;
+  }
+
+  getArea(): number {
+    return this.width * this.height;
+  }
+}
+
+class Square extends Rectangle {
+  setWidth(width: number): void {
+    this.width = width;
+    this.height = width; // Violates expectation
+  }
+
+  setHeight(height: number): void {
+    this.width = height; // Violates expectation
+    this.height = height;
+  }
+}
+
+// This code breaks
+function resizeRectangle(rect: Rectangle): void {
+  rect.setWidth(5);
+  rect.setHeight(10);
+  console.log(`Expected area: 50, Actual area: ${rect.getArea()}`);
+}
+
+const square = new Square(3, 3);
+resizeRectangle(square); // Expected: 50, Actual: 100
+```
+
+**Problem**: `Square` violates the behavioral contract of `Rectangle`.
+
+### Good Example: Proper Abstraction
+
+```typescript
+interface Shape {
+  getArea(): number;
+  getPerimeter(): number;
+}
+
+class Rectangle implements Shape {
+  constructor(private width: number, private height: number) {}
+
+  setWidth(width: number): void {
+    this.width = width;
+  }
+
+  setHeight(height: number): void {
+    this.height = height;
+  }
+
+  getArea(): number {
+    return this.width * this.height;
+  }
+
+  getPerimeter(): number {
+    return 2 * (this.width + this.height);
+  }
+}
+
+class Square implements Shape {
+  constructor(private side: number) {}
+
+  setSide(side: number): void {
+    this.side = side;
+  }
+
+  getArea(): number {
+    return this.side * this.side;
+  }
+
+  getPerimeter(): number {
+    return 4 * this.side;
+  }
+}
+```
+
+**Benefit**: Each shape manages its own invariants without violating expectations.
+
+---
+
+## I — Interface Segregation Principle (ISP)
+
+### The Core Idea
+**No client should be forced to depend on methods it does not use.**
+
+Large, monolithic interfaces create unnecessary coupling. Clients should only know about the methods relevant to them.
+
+### Bad Example: Fat Interface
+
+```typescript
+interface Worker {
+  work(): void;
+  eat(): void;
+  sleep(): void;
+  attendMeeting(): void;
+  writeCode(): void;
+  designUI(): void;
+}
+
+class Developer implements Worker {
+  work(): void { console.log("Writing code"); }
+  eat(): void { console.log("Eating lunch"); }
+  sleep(): void { console.log("Sleeping"); }
+  attendMeeting(): void { console.log("In meeting"); }
+  writeCode(): void { console.log("Coding"); }
+  designUI(): void { 
+    throw new Error("Developers don't design UI"); // Forced implementation
+  }
+}
+
+class Designer implements Worker {
+  work(): void { console.log("Designing"); }
+  eat(): void { console.log("Eating lunch"); }
+  sleep(): void { console.log("Sleeping"); }
+  attendMeeting(): void { console.log("In meeting"); }
+  writeCode(): void { 
+    throw new Error("Designers don't write code"); // Forced implementation
+  }
+  designUI(): void { console.log("Creating mockups"); }
+}
+```
+
+### Good Example: Segregated Interfaces
+
+```typescript
+interface Workable {
+  work(): void;
+}
+
+interface Eatable {
+  eat(): void;
+}
+
+interface Sleepable {
+  sleep(): void;
+}
+
+interface Meetable {
+  attendMeeting(): void;
+}
+
+interface Codeable {
+  writeCode(): void;
+}
+
+interface Designable {
+  designUI(): void;
+}
+
+class Developer implements Workable, Eatable, Sleepable, Meetable, Codeable {
+  work(): void { this.writeCode(); }
+  eat(): void { console.log("Eating lunch"); }
+  sleep(): void { console.log("Sleeping"); }
+  attendMeeting(): void { console.log("In meeting"); }
+  writeCode(): void { console.log("Writing code"); }
+}
+
+class Designer implements Workable, Eatable, Sleepable, Meetable, Designable {
+  work(): void { this.designUI(); }
+  eat(): void { console.log("Eating lunch"); }
+  sleep(): void { console.log("Sleeping"); }
+  attendMeeting(): void { console.log("In meeting"); }
+  designUI(): void { console.log("Creating mockups"); }
+}
+```
+
+**Benefit**: Each class only implements the interfaces relevant to its role.
+
+---
+
+## D — Dependency Inversion Principle (DIP)
+
+### The Core Idea
+**High-level modules should not depend on low-level modules. Both should depend on abstractions.**
+
+This inverts the traditional dependency flow. Instead of high-level business logic depending on low-level implementation details, both depend on abstract interfaces.
+
+### Bad Example: Direct Dependency
+
+```typescript
+class MySQLDatabase {
+  connect(): void {
+    console.log("Connecting to MySQL");
+  }
+
+  query(sql: string): any[] {
+    console.log(`Executing: ${sql}`);
+    return [];
+  }
+}
+
+class UserService {
+  private database: MySQLDatabase; // Tightly coupled
+
+  constructor() {
+    this.database = new MySQLDatabase();
+  }
+
+  getUsers(): User[] {
+    this.database.connect();
+    return this.database.query("SELECT * FROM users");
+  }
+}
+```
+
+**Problem**: `UserService` is tightly coupled to `MySQLDatabase`. Switching to PostgreSQL requires rewriting `UserService`.
+
+### Good Example: Dependency Inversion
+
+```typescript
+interface Database {
+  connect(): void;
+  query(sql: string): any[];
+}
+
+class MySQLDatabase implements Database {
+  connect(): void {
+    console.log("Connecting to MySQL");
+  }
+
+  query(sql: string): any[] {
+    console.log(`MySQL executing: ${sql}`);
+    return [];
+  }
+}
+
+class PostgreSQLDatabase implements Database {
+  connect(): void {
+    console.log("Connecting to PostgreSQL");
+  }
+
+  query(sql: string): any[] {
+    console.log(`PostgreSQL executing: ${sql}`);
+    return [];
+  }
+}
+
+class MongoDatabase implements Database {
+  connect(): void {
+    console.log("Connecting to MongoDB");
+  }
+
+  query(sql: string): any[] {
+    console.log("MongoDB query (translated from SQL)");
+    return [];
+  }
+}
+
+class UserService {
+  constructor(private database: Database) {} // Depends on abstraction
+
+  getUsers(): User[] {
+    this.database.connect();
+    return this.database.query("SELECT * FROM users");
+  }
+}
+
+// Usage
+const mysqlDb = new MySQLDatabase();
+const userService1 = new UserService(mysqlDb);
+
+const postgresDb = new PostgreSQLDatabase();
+const userService2 = new UserService(postgresDb);
+```
+
+**Benefit**: `UserService` works with any database implementation. The dependency is injected, not hardcoded.
+
+---
+
+## The Unified Theory
+
+SOLID principles are not isolated rules. They form a cohesive philosophy:
+
+1. **SRP** reduces the blast radius of change
+2. **OCP** allows growth without risk
+3. **LSP** ensures inheritance makes sense
+4. **ISP** prevents interface bloat
+5. **DIP** decouples business logic from implementation
+
+When applied together, they create systems that are **modular**, **testable**, and **resilient to change**. They transform code from a rigid structure into a living architecture that evolves gracefully over time.
+
+The next time you write a class, ask yourself: Does this have a single, clear purpose? Can I extend it without modification? Would a subtype work anywhere the parent does? Are my interfaces minimal? Am I depending on abstractions?
+
+These questions are the difference between code that lasts and code that rots.

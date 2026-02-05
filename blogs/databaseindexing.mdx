@@ -1,0 +1,544 @@
+---
+title: "Database Indexing: The Hidden Data Structures Behind Fast Queries"
+date: "2026-02-05"
+description: "A deep exploration of B-Trees, hash indexes, and the mathematical principles that make billion-row databases respond in milliseconds."
+tags: ["Databases", "Indexing", "Performance", "Data Structures", "SQL"]
+published: true
+---
+
+## Database Indexing: The Hidden Data Structures Behind Fast Queries
+
+You have a table with 100 million rows. Without an index, finding a single record requires scanning every row—a **full table scan** that takes seconds or even minutes.
+
+With the right index, that same query returns in **milliseconds**.
+
+Indexes are the secret weapon of database performance. They transform impossibly slow queries into instant responses. But they're not magic—they're sophisticated data structures that trade space for speed through careful algorithmic design.
+
+Understanding indexes means understanding the mathematics of search, the physics of storage, and the art of balancing competing concerns.
+
+---
+
+## The Fundamental Problem: Search Complexity
+
+### Linear Search: The Naive Approach
+
+Without an index, finding a record requires checking every row:
+
+```sql
+SELECT * FROM users WHERE email = 'alice@example.com';
+```
+
+**Time Complexity:** $O(n)$ where $n$ is the number of rows.
+
+For 100 million rows at 1 microsecond per comparison:
+$$ T = 100,000,000 \times 1\mu s = 100 \text{ seconds} $$
+
+Unacceptable for any real application.
+
+### Binary Search: The Sorted Solution
+
+If data is sorted, we can use binary search:
+
+```
+[1, 3, 5, 7, 9, 11, 13, 15, 17, 19]
+Looking for 11:
+- Check middle: 9 (too small)
+- Check middle of right half: 15 (too large)
+- Check middle of 9-15: 11 (found!)
+```
+
+**Time Complexity:** $O(\log n)$
+
+For 100 million rows:
+$$ T = \log_2(100,000,000) \approx 27 \text{ comparisons} $$
+
+At 1 microsecond per comparison: **27 microseconds** vs. 100 seconds!
+
+**The Problem:** Binary search requires sorted data and sequential access. Databases store data on disk, where random access is expensive.
+
+---
+
+## B-Trees: The Foundation of Database Indexes
+
+The **B-Tree** (Balanced Tree) is the most common index structure. It's optimized for systems that read and write large blocks of data—exactly what databases do.
+
+### Structure
+
+A B-Tree node contains:
+- **Keys**: Sorted values (e.g., user IDs, email addresses)
+- **Pointers**: References to child nodes or actual data rows
+- **Order $m$**: Maximum number of children per node
+
+```
+                    [20, 40, 60]
+                   /    |    |   \
+                  /     |    |    \
+        [10, 15]  [25, 30, 35]  [45, 50]  [70, 80, 90]
+         /  |  \      / | | \      /  |      /  |  \
+       ...  ... ...  ... ... ...  ... ...  ... ... ...
+```
+
+### Properties
+1. All leaf nodes are at the same depth
+2. Each node (except root) has at least $\lceil m/2 \rceil$ children
+3. Keys within nodes are sorted
+4. A node with $k$ keys has $k+1$ children
+
+### Search Algorithm
+
+```python
+def search_btree(node, key):
+    # Find the correct position in this node
+    i = 0
+    while i < len(node.keys) and key > node.keys[i]:
+        i += 1
+    
+    # Found exact match
+    if i < len(node.keys) and key == node.keys[i]:
+        return node.values[i]
+    
+    # If leaf node, key doesn't exist
+    if node.is_leaf:
+        return None
+    
+    # Recursively search the appropriate child
+    return search_btree(node.children[i], key)
+```
+
+### Time Complexity
+
+Height of a B-Tree with $n$ keys and minimum degree $t$:
+$$ h \leq \log_t(n) $$
+
+For a B-Tree with degree 100 and 1 billion records:
+$$ h \leq \log_{100}(1,000,000,000) = \frac{\log(10^9)}{\log(100)} \approx 4.5 $$
+
+So finding any record requires **at most 5 disk reads**.
+
+---
+
+## Why B-Trees, Not Binary Trees?
+
+Binary search trees have $O(\log n)$ complexity, but they're terrible for databases.
+
+### The Problem: Disk I/O
+
+Modern SSDs:
+- Sequential read: **3 GB/s**
+- Random read: **200,000 IOPS**
+- Single random read: **~5 microseconds**
+
+Reading 1 KB randomly takes 5μs. Reading 1 MB sequentially takes:
+$$ t = \frac{1 \text{ MB}}{3 \text{ GB/s}} = 333\mu s $$
+
+**The Insight:** It's faster to read 200 KB sequentially than to perform 200 separate 1 KB random reads.
+
+### B-Tree Optimization
+
+B-Trees pack many keys into each node (often 4-16 KB). With 100 keys per node:
+- Binary tree: 27 disk reads for 100M records
+- B-Tree with degree 100: **5 disk reads**
+
+This is why B-Trees dominate: they **minimize disk I/O** by maximizing node size.
+
+---
+
+## Real-World Example: PostgreSQL B-Tree Index
+
+### Creating an Index
+
+```sql
+CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    email VARCHAR(255),
+    name VARCHAR(100),
+    created_at TIMESTAMP
+);
+
+-- Without index
+EXPLAIN ANALYZE SELECT * FROM users WHERE email = 'alice@example.com';
+```
+
+**Result:**
+```
+Seq Scan on users  (cost=0.00..180025.00 rows=1 width=48) (actual time=2341.123..2341.125 rows=1 loops=1)
+  Filter: (email = 'alice@example.com')
+Planning Time: 0.123 ms
+Execution Time: 2341.456 ms
+```
+
+2.3 seconds for a single user!
+
+### Adding an Index
+
+```sql
+CREATE INDEX idx_users_email ON users(email);
+
+EXPLAIN ANALYZE SELECT * FROM users WHERE email = 'alice@example.com';
+```
+
+**Result:**
+```
+Index Scan using idx_users_email on users  (cost=0.56..8.58 rows=1 width=48) (actual time=0.034..0.036 rows=1 loops=1)
+  Index Cond: (email = 'alice@example.com')
+Planning Time: 0.089 ms
+Execution Time: 0.067 ms
+```
+
+**0.067 ms** vs. 2341 ms—a **35,000x speedup**!
+
+---
+
+## Composite Indexes: Multiple Columns
+
+Indexes can span multiple columns, creating a hierarchical sort:
+
+```sql
+CREATE INDEX idx_users_country_city_name ON users(country, city, name);
+```
+
+This creates an index sorted first by country, then city within each country, then name within each city:
+
+```
+Australia, Melbourne, Alice
+Australia, Melbourne, Bob
+Australia, Sydney, Charlie
+USA, New York, David
+USA, New York, Eve
+USA, Seattle, Frank
+```
+
+### Query Optimization Rules
+
+This index helps queries in this order:
+
+**Fast (uses index):**
+```sql
+WHERE country = 'USA'
+WHERE country = 'USA' AND city = 'New York'
+WHERE country = 'USA' AND city = 'New York' AND name = 'David'
+```
+
+**Slow (cannot use index effectively):**
+```sql
+WHERE city = 'New York'  -- Skips first column
+WHERE name = 'David'      -- Skips first two columns
+WHERE country = 'USA' AND name = 'David'  -- Skips middle column
+```
+
+**The Rule:** Indexes work from left to right. Skipping a column breaks the index chain.
+
+---
+
+## Hash Indexes: O(1) Lookups
+
+For exact-match queries, **hash indexes** offer constant-time lookups.
+
+### How They Work
+
+```python
+def hash_index(key):
+    # Hash function maps keys to bucket numbers
+    bucket = hash(key) % num_buckets
+    
+    # Each bucket contains list of (key, value) pairs
+    for stored_key, value in buckets[bucket]:
+        if stored_key == key:
+            return value
+    
+    return None
+```
+
+### Mathematical Properties
+
+Given $n$ keys and $m$ buckets, average bucket size is:
+$$ \text{Load Factor} = \frac{n}{m} $$
+
+Expected lookup time:
+$$ T = O(1 + \alpha) $$
+
+where $\alpha$ is the load factor.
+
+With good hash function and $\alpha < 1$, lookups are **constant time**.
+
+### Limitations
+
+Hash indexes cannot support:
+- Range queries (`WHERE age BETWEEN 18 AND 25`)
+- Sorting (`ORDER BY name`)
+- Prefix matching (`WHERE email LIKE 'alice%'`)
+
+They only work for exact equality: `WHERE id = 42`.
+
+**When to Use:**
+- Primary keys
+- Unique identifiers
+- Equality-only queries
+- In-memory databases (Redis, Memcached)
+
+---
+
+## Covering Indexes: Avoiding Table Lookups
+
+A **covering index** includes all columns needed by a query, eliminating the need to access the main table.
+
+### Without Covering Index
+
+```sql
+CREATE INDEX idx_email ON users(email);
+
+SELECT email, name FROM users WHERE email = 'alice@example.com';
+```
+
+**Process:**
+1. Search index for email → get row pointer
+2. Read row from table → get name
+3. Return (email, name)
+
+**Two disk reads.**
+
+### With Covering Index
+
+```sql
+CREATE INDEX idx_email_name ON users(email, name);
+
+SELECT email, name FROM users WHERE email = 'alice@example.com';
+```
+
+**Process:**
+1. Search index for email → find (email, name) in index itself
+2. Return immediately
+
+**One disk read.**
+
+The query is "covered" entirely by the index—a **2x speedup**.
+
+---
+
+## Index Selectivity: When Indexes Fail
+
+Not all indexes are created equal. **Selectivity** measures how unique values are:
+
+$$ \text{Selectivity} = \frac{\text{Distinct Values}}{\text{Total Rows}} $$
+
+### High Selectivity (Good)
+
+```sql
+CREATE INDEX idx_email ON users(email);
+```
+
+If 1 million users have 999,000 unique emails:
+$$ \text{Selectivity} = \frac{999,000}{1,000,000} = 0.999 $$
+
+Index is highly effective—most queries return few rows.
+
+### Low Selectivity (Bad)
+
+```sql
+CREATE INDEX idx_gender ON users(gender);
+```
+
+If 1 million users have only 3 genders:
+$$ \text{Selectivity} = \frac{3}{1,000,000} = 0.000003 $$
+
+Query: `WHERE gender = 'female'` returns ~500,000 rows.
+
+**The Problem:** Index scan might be **slower than full table scan** because:
+1. Traverse index B-Tree
+2. For each matching key, read row from table
+3. 500,000 random disk reads!
+
+Better to just scan the table sequentially.
+
+### The Rule
+
+Databases use indexes only when:
+$$ \text{Expected Rows} < \text{Threshold} \times \text{Total Rows} $$
+
+Typically threshold ≈ 5-15%.
+
+---
+
+## Partial Indexes: Indexing Subsets
+
+**Partial indexes** only index rows matching a condition:
+
+```sql
+CREATE INDEX idx_active_users ON users(email) WHERE active = true;
+```
+
+### Benefits
+
+If 90% of users are inactive:
+- Regular index: 1 million entries
+- Partial index: 100,000 entries
+
+**10x smaller**, 10x faster to search, 10x less storage.
+
+Perfect for queries like:
+```sql
+SELECT * FROM users WHERE active = true AND email = 'alice@example.com';
+```
+
+---
+
+## Index Maintenance: The Hidden Cost
+
+Indexes speed up reads but **slow down writes**.
+
+### The Trade-off
+
+**Without Index:**
+```sql
+INSERT INTO users VALUES (...)  -- Just append to table
+```
+Time: $O(1)$
+
+**With Index:**
+```sql
+INSERT INTO users VALUES (...)
+  1. Append to table
+  2. Update primary key index (B-Tree insertion)
+  3. Update email index
+  4. Update name index
+  5. Update composite indexes
+```
+Time: $O(k \log n)$ where $k$ is number of indexes.
+
+### Write Amplification
+
+For a table with 5 indexes, each insert triggers:
+- 1 table write
+- 5 index writes
+
+**6 writes per logical write**—this is **write amplification**.
+
+### When to Skip Indexes
+
+Avoid indexes on:
+- Columns with low selectivity
+- Frequently updated columns
+- Write-heavy tables where read speed isn't critical
+- Tables smaller than a few thousand rows (full scans are fast enough)
+
+---
+
+## Advanced: Bloom Filters for Negative Queries
+
+**Bloom filters** probabilistically test set membership.
+
+### How They Work
+
+```python
+class BloomFilter:
+    def __init__(self, size, num_hashes):
+        self.bits = [0] * size
+        self.num_hashes = num_hashes
+    
+    def add(self, item):
+        for i in range(self.num_hashes):
+            index = hash_function(item, i) % len(self.bits)
+            self.bits[index] = 1
+    
+    def might_contain(self, item):
+        for i in range(self.num_hashes):
+            index = hash_function(item, i) % len(self.bits)
+            if self.bits[index] == 0:
+                return False  # Definitely not present
+        return True  # Might be present
+```
+
+### Properties
+
+- **No false negatives**: If it says "not present", it's definitely not present
+- **Possible false positives**: If it says "might be present", it might actually be absent
+- **Space efficient**: 10 bits per element for 1% false positive rate
+
+### Database Use Case
+
+Before scanning a large index or table, check Bloom filter:
+```sql
+SELECT * FROM users WHERE email = 'nonexistent@example.com';
+```
+
+Bloom filter says "definitely not present" → skip index scan entirely.
+
+---
+
+## Index Statistics and Query Planning
+
+Databases maintain statistics about data distribution:
+
+```sql
+ANALYZE users;  -- Update statistics
+```
+
+Statistics tracked:
+- Number of rows
+- Number of distinct values per column
+- Data distribution histogram
+- Correlation between columns
+- Average row size
+
+### The Query Planner
+
+The planner uses statistics to choose between:
+- Full table scan
+- Index scan
+- Multiple index scans combined
+- Hash join vs. merge join
+
+**Cost estimation:**
+$$ C_{total} = C_{cpu} \times N_{rows} + C_{io} \times N_{pages} $$
+
+The planner compares all possible execution plans and picks the cheapest.
+
+---
+
+## Real-World Performance Comparison
+
+### Test Setup
+- Table: 10 million users
+- Query: Find user by email
+
+| Index Type | Structure | Query Time | Index Size |
+|:-----------|:----------|:-----------|:-----------|
+| None | Full table scan | 2.4s | 0 MB |
+| B-Tree | Sorted tree | 0.12ms | 214 MB |
+| Hash | Hash table | 0.08ms | 197 MB |
+| Covering (email, name) | B-Tree + columns | 0.06ms | 389 MB |
+
+**Trade-offs:**
+- Hash: Fastest for exact match, but no range queries
+- B-Tree: Versatile, supports ranges and sorting
+- Covering: Fastest when columns included, but larger size
+
+---
+
+## The Golden Rules of Indexing
+
+1. **Index columns used in WHERE clauses**
+2. **Index columns used in JOIN conditions**
+3. **Consider composite indexes for multi-column queries**
+4. **Use covering indexes for frequently accessed column combinations**
+5. **Avoid indexes on low-selectivity columns**
+6. **Use partial indexes for subset queries**
+7. **Monitor query performance with EXPLAIN**
+8. **Balance read speed vs. write overhead**
+9. **Regularly update statistics**
+10. **Drop unused indexes**
+
+---
+
+## Conclusion: The Art of Balance
+
+Indexes are not free. They consume space, slow writes, and require maintenance. The art of database design lies in finding the balance:
+
+Too few indexes → Slow queries
+Too many indexes → Slow writes, wasted space
+
+The goal is **strategic indexing**: cover the queries that matter most while avoiding diminishing returns.
+
+Every millisecond saved through proper indexing is a millisecond your users aren't waiting. In aggregate, these optimizations transform user experience from frustrating to seamless.
+
+Understanding indexes means understanding the hidden machinery that makes modern databases possible. From the mathematics of B-Trees to the physics of disk I/O, every aspect is engineered for one purpose: **making billion-row databases feel instant**.
