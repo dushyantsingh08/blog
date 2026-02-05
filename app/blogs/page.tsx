@@ -1,11 +1,12 @@
 import { getallpostMeta } from "@/lib/blog";
 import Link from "next/link";
 import BlogCard from "@/components/BlogCard";
+import { constructMetadata } from "@/lib/seo";
 
-export const metadata = {
-    title: "Blogs | dushyant singh",
-    description: "All my writings and thoughts",
-};
+export const metadata = constructMetadata({
+    title: "Blogs | Dushyant Singh",
+    description: "All my writings and thoughts on software engineering and architecture.",
+});
 
 export default async function BlogList() {
     const posts = await getallpostMeta();

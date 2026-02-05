@@ -3,6 +3,7 @@ import { PROSE_STYLES } from "@/lib/styles";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { Metadata } from "next";
+import { constructMetadata } from "@/lib/seo";
 
 // Force static generation for known slugs
 export async function generateStaticParams() {
@@ -19,15 +20,17 @@ export async function generateMetadata({
     const post = await getPostBySlug(slug);
 
     if (!post) {
-        return {
+        return constructMetadata({
             title: "Post Not Found",
-        };
+            noIndex: true,
+        });
     }
 
-    return {
-        title: `${post.title} |  Dushyant Singh `,
+    return constructMetadata({
+        title: `${post.title} | Dushyant Singh`,
         description: post.description,
-    };
+        image: `https://dushyantsingh.com/api/og?title=${encodeURIComponent(post.title)}`, // Example dynamic OG
+    });
 }
 
 export default async function BlogPost({

@@ -1,6 +1,13 @@
+import BlogCard from "@/components/BlogCard";
+import { constructMetadata } from "@/lib/seo";
 import { getallpostMeta } from "@/lib/blog";
 import Link from "next/link";
-import BlogCard from "@/components/BlogCard";
+
+export const metadata = constructMetadata({
+  title: "Home | Dushyant Singh",
+  description: "Fullstack Engineer building stuff that matters.",
+});
+
 
 function formatDate(dateString: string): string {
   const date = new Date(dateString);

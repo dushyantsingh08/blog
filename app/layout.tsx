@@ -15,10 +15,10 @@ const jetbrainsMono = JetBrains_Mono({
   subsets: ["latin"],
 });
 
-export const metadata: Metadata = {
-  title: "Dushyant singh",
-  description: "My Blogs and thoughts",
-};
+import { constructMetadata } from "@/lib/seo";
+
+export const metadata: Metadata = constructMetadata();
+
 
 export default function RootLayout({
   children,
