@@ -2,7 +2,7 @@
 
 A minimal, high-performance portfolio and blog built with **Next.js**, **Tailwind CSS**, and **MDX**. Designed with strict typography and a focus on content.
 
-![Preview](./public/og-image.png)
+![Preview](./public/stage-1770288100160.png)
 
 ## Features
 
@@ -67,4 +67,4 @@ The site uses a modular SEO approach defined in `lib/seo.ts`. Global configurati
 
 ---
 
-Built by [Dushyant Singh](https://dushyantsingh.com)
+Built with ❤️ by [Dushyant Singh](https://dushyantx.in)
