@@ -1,0 +1,391 @@
+---
+title: "Inside Write-Heavy Databases: WAL, Memtables, Skip Lists and SSTables"
+date: "2026-10-26"
+description: "A deep dive into how LSM-tree databases like Cassandra, RocksDB and LevelDB handle write-heavy workloads using Write-Ahead Logs, Memtables, Skip Lists, SSTables and compaction."
+tags: ["Databases", "LSM Tree", "RocksDB", "Cassandra", "Data Structures", "Performance"]
+published: true
+---
+
+## Inside Write-Heavy Databases: WAL, Memtables, Skip Lists and SSTables
+
+Some databases are built to answer questions fast. Others are built to *swallow data* fast: metrics, logs, events, chat messages, sensor readings, activity feeds. Cassandra, RocksDB, LevelDB, HBase, ScyllaDB and many others sit in the second camp, and almost all of them share one architecture: the **Log-Structured Merge tree (LSM tree)**.
+
+This post walks through how that architecture works, why it handles writes so well, and what each moving part does: the **write-ahead log (WAL)**, the **memtable**, the **skip list** inside it, the **SSTable** on disk, and the **compaction** process that keeps everything tidy.
+
+---
+
+## 1. The problem: in-place updates are slow
+
+Traditional relational databases (PostgreSQL, MySQL/InnoDB) are typically built around a **B-tree**. A B-tree keeps data sorted in fixed-size pages on disk. To insert a key you:
+
+1. Walk down the tree to find the right leaf page.
+2. Read that page into memory (if it isn't already).
+3. Modify it, possibly splitting it.
+4. Write the page back to its original location.
+
+The catch is step 4. Keys arrive in random order, so the pages you touch are scattered across the disk. That means **random I/O**, which is the slowest access pattern on both spinning disks (seek time) and SSDs (small random writes cause write amplification inside the flash translation layer).
+
+B-trees also modify pages in place, so they need a separate log to survive a crash halfway through a page write. You pay twice: once for the log and once for the random page write.
+
+LSM trees take a radically different approach:
+
+> **Never update data in place. Buffer writes in memory, append them to a log, and flush them to disk in big sorted, sequential batches.**
+
+Sequential writes are the fastest thing a disk can do. An LSM tree converts a stream of random writes into a stream of sequential ones.
+
+---
+
+## 2. The big picture
+
+Here is the whole write path at a glance:
+
+```
+            client write: PUT(key, value)
+                       |
+                       v
+        +------------------------------+
+   (1)  |  Write-Ahead Log (WAL)       |  append-only file on disk
+        |  sequential append + fsync   |  -> durability
+        +------------------------------+
+                       |
+                       v
+        +------------------------------+
+   (2)  |  MemTable (in RAM)           |  sorted structure,
+        |  skip list                   |  usually a skip list
+        +------------------------------+
+                       |  full? (e.g. 64 MB)
+                       v
+        +------------------------------+
+   (3)  |  Immutable MemTable          |  frozen, read-only,
+        |  (waiting to be flushed)     |  new MemTable takes over
+        +------------------------------+
+                       |  background flush
+                       v
+        +------------------------------+
+   (4)  |  SSTable on disk (Level 0)   |  immutable sorted file
+        +------------------------------+
+                       |  background compaction
+                       v
+        +------------------------------+
+   (5)  |  Levels L1, L2, L3 ...       |  bigger, merged,
+        |  (or size-tiered buckets)    |  de-duplicated SSTables
+        +------------------------------+
+```
+
+The client gets its acknowledgement after steps 1 and 2. Everything after that happens in the background. That's the secret to write throughput: the expensive work is deferred and batched.
+
+---
+
+## 3. Step one: the Write-Ahead Log (WAL)
+
+RAM is fast but volatile. If the process crashes or the machine loses power, everything in the memtable disappears. The WAL solves this.
+
+Before a write is applied to the memtable, it is **appended to a log file on disk**. The log is purely sequential: new records go at the end, nothing is ever modified in the middle.
+
+```
+WAL file (append only)
++--------+--------+--------+--------+--------+-----> grows
+| rec 1  | rec 2  | rec 3  | rec 4  | rec 5  |
++--------+--------+--------+--------+--------+
+
+record layout:
++----------+--------+------+--------------------------+
+| checksum | length | type | key, value, sequence no. |
++----------+--------+------+--------------------------+
+```
+
+A few important details:
+
+- **Checksums** let recovery detect a torn or partially written record at the tail of the log and stop cleanly there.
+- **Durability is tunable.** Calling `fsync` after every write gives the strongest guarantee but limits throughput. Many systems offer *periodic sync* (fsync every N milliseconds, accepting a small loss window) or *group commit*, where many concurrent writers share one fsync.
+- **Group commit** is a big deal for write-heavy workloads: one fsync can cover hundreds of writes that arrived in the same short window.
+- **Recovery is simple.** On restart, the database replays the WAL from the last checkpoint, re-inserting each record into a fresh memtable. When a memtable is successfully flushed to an SSTable, the corresponding WAL segment is no longer needed and can be deleted or recycled.
+
+The WAL is write-only during normal operation. It is read **only** during crash recovery. That's why it is cheap: it is the one place where a durable write costs a single sequential append.
+
+---
+
+## 4. Step two: the MemTable
+
+After the WAL append, the write lands in the **memtable**, an in-memory sorted data structure. It plays two roles:
+
+1. **Write buffer.** It absorbs thousands of writes per second at RAM speed. If the same key is written ten times, only the latest version has to be flushed.
+2. **Read cache for recent data.** Reads check the memtable first, because the freshest version of any key lives there.
+
+The memtable must keep keys **sorted**, because when it is flushed to disk it becomes a sorted file. It also needs to support fast inserts, fast point lookups and in-order iteration. Candidates include red-black trees, AVL trees, B-trees, tries, and the most popular choice, the **skip list**.
+
+---
+
+## 5. Why a skip list?
+
+A skip list is a linked list with "express lanes". The bottom level is an ordinary sorted linked list containing every key. Each higher level contains a random subset of the keys below it, letting a search jump over many nodes at once.
+
+```
+Level 3:  HEAD -----------------------------> 50 -----------------------> NIL
+Level 2:  HEAD -----------> 17 -------------> 50 -----------> 80 --------> NIL
+Level 1:  HEAD ----> 9 --> 17 ----> 31 -----> 50 ----> 62 -> 80 --------> NIL
+Level 0:  HEAD -> 3 -> 9 -> 17 -> 25 -> 31 -> 42 -> 50 -> 62 -> 71 -> 80 -> NIL
+```
+
+**Searching for 62:**
+
+```
+Start at HEAD, top level (3):
+  next is 50 (< 62)  -> move to 50
+  next is NIL        -> drop to level 2
+At 50, level 2:
+  next is 80 (> 62)  -> drop to level 1
+At 50, level 1:
+  next is 62         -> found!
+```
+
+**How levels are assigned.** When inserting a node, flip a coin repeatedly: keep promoting it one level up while the coin comes up heads (LevelDB uses a promotion probability of 1/4 and a maximum height of 12). No rebalancing ever happens. The structure stays balanced *probabilistically*, giving expected **O(log n)** search, insert and delete.
+
+### Why databases love skip lists
+
+| Property | Why it matters for a memtable |
+| --- | --- |
+| No rebalancing or rotations | An insert only touches a few pointers, so it is cheap and local. |
+| Easy to make concurrent | Inserting means splicing a node in with a few pointer updates (often compare-and-swap). Readers can traverse without locks while writers insert. Balanced trees need rotations that can touch large parts of the structure. |
+| Naturally ordered | Flushing is a simple in-order walk of the bottom level. |
+| Simple to implement | Far less code and fewer subtle bugs than a lock-free red-black tree. |
+
+This is why LevelDB and RocksDB (by default) and Apache HBase's MemStore use skip lists, and why Cassandra's memtable has traditionally been built on a concurrent skip list as well. Some engines offer alternatives, such as hash-based or trie-based memtables, which trade ordered iteration or memory for faster point operations. The skip list remains the safe default.
+
+### Append-only inside the memtable too
+
+Updates and deletes in the memtable are typically **new entries**, not modifications. Each entry carries a monotonically increasing **sequence number**:
+
+```
+(key="user:7", seq=101, value="alice")
+(key="user:7", seq=118, value="alicia")      <- newer wins
+(key="user:7", seq=130, TOMBSTONE)           <- delete marker
+```
+
+Because nodes are never modified once linked in, readers never see half-updated data, and sequence numbers give you snapshot isolation almost for free: a reader just ignores entries newer than its snapshot.
+
+---
+
+## 6. Step three: flushing to an SSTable
+
+When the memtable reaches a size threshold (commonly tens of MB), it is made **immutable**. A fresh, empty memtable takes over incoming writes (with its own new WAL segment), so writers are never blocked while the old one is written out.
+
+A background thread walks the frozen skip list in order and writes it out as an **SSTable** (Sorted String Table): an immutable, sorted file.
+
+```
+                     SSTable file layout
++-------------------------------------------------------+
+| Data block 1   | k1:v1, k2:v2, k3:v3 ...  (e.g. 4 KB)  |
+| Data block 2   | k9:v9, k10:v10 ...                    |
+| Data block 3   | ...                                   |
++-------------------------------------------------------+
+| Filter block   | Bloom filter over all keys            |
++-------------------------------------------------------+
+| Index block    | first/last key of each data block     |
+|                |  -> (offset, size) of that block      |
++-------------------------------------------------------+
+| Footer         | pointers to index + filter blocks,    |
+|                | magic number, checksum                |
++-------------------------------------------------------+
+```
+
+Key properties:
+
+- **Immutable.** Once written, an SSTable is never modified. That kills a whole class of problems: no locking for reads, trivially cacheable, safe to copy for backups, and easy to reason about.
+- **Sorted.** Keys are in order, so range scans are sequential reads and two SSTables can be merged with a simple merge-sort style pass.
+- **Block-based.** Data is split into blocks (often compressed with Snappy, LZ4 or Zstd). The **index block** is a sparse index: it doesn't list every key, just where each block starts. A lookup binary-searches the index, then reads and searches a single block.
+- **Bloom filter.** A compact probabilistic structure that answers "is this key *definitely not* in this file?" With roughly 10 bits per key, the false-positive rate is about 1%, which lets reads skip most SSTables entirely.
+
+Once the SSTable is safely on disk, the immutable memtable is dropped and its WAL segment can be discarded. The write has now gone **memory → sequential disk write**, with no random I/O at any point.
+
+---
+
+## 7. How reads work (and why they're harder)
+
+The price of fast writes is that the latest version of a key could be in many places. A read checks them in order from newest to oldest:
+
+```
+GET("user:7")
+   |
+   v
+[1] active memtable          -> hit? return (or tombstone -> "not found")
+   |  miss
+   v
+[2] immutable memtable(s)    -> hit? return
+   |  miss
+   v
+[3] Level-0 SSTables         -> check newest first; Bloom filter first,
+   |                            then index, then data block
+   v
+[4] Level-1 ... Level-N      -> usually one candidate file per level
+   |
+   v
+  not found
+```
+
+Three things keep this fast in practice:
+
+- **Bloom filters** let the engine skip files that can't contain the key.
+- **The block cache** keeps hot data blocks (and often index and filter blocks) in memory.
+- **Compaction** keeps the number of files a read must consult small (more on that next).
+
+Still, reads are generally more expensive than in a B-tree, especially range scans and lookups for keys that don't exist. This is the fundamental trade-off of the design.
+
+---
+
+## 8. Deletes and updates: tombstones
+
+Since SSTables are immutable, you can't remove a key from an old file. Instead, a delete writes a **tombstone**, a special marker saying "this key is deleted as of sequence number N".
+
+- Reads that find a tombstone first stop and report "not found", even if older SSTables still contain the value.
+- During compaction, when the tombstone meets the older value, both are dropped. Tombstones can only be discarded once the engine is sure no older version survives in a deeper level (Cassandra additionally keeps them for a grace period so deletes propagate to replicas).
+
+Updates work the same way: a new version is simply written, and older versions become garbage that compaction reclaims later.
+
+---
+
+## 9. Compaction: paying the debt
+
+Without cleanup, SSTables would pile up forever. Reads would have to check more and more files, and obsolete versions and tombstones would waste space. **Compaction** is the background process that merges SSTables.
+
+Mechanically it is a **k-way merge**: open several sorted files, repeatedly take the smallest key, keep only the newest version, drop tombstones and obsolete data, and write a new sorted file. All of it is sequential I/O.
+
+```
+  SSTable A            SSTable B             Merged output
+  a:1  c:3  e:5        a:9  b:2  e:(del)     a:9
+  (older)              (newer)               b:2
+                                             c:3
+                                             (e removed: tombstone
+                                              cancels old value)
+```
+
+There are two main strategies.
+
+### Leveled compaction (LevelDB, RocksDB default)
+
+SSTables are organised into levels, each roughly 10x larger than the previous. Within a level (except L0), files have **non-overlapping key ranges**.
+
+```
+L0:  [a-z] [b-y] [a-x]          <- fresh flushes, may overlap
+L1:  [a-f] [g-m] [n-s] [t-z]    <- sorted, non-overlapping   (~100 MB)
+L2:  [a-c][d-f][g-i][j-l] ...   <- 10x bigger                (~1 GB)
+L3:  ........................   <- 10x bigger again          (~10 GB)
+
+When L1 exceeds its size limit:
+  pick one file (say [g-m]), find overlapping files in L2,
+  merge them, write new files into L2.
+```
+
+- **Pros:** at most one file per level to check for a key, so reads are cheap; low space amplification.
+- **Cons:** the same data is rewritten many times as it moves down levels, so **write amplification** is high (roughly 10x per level in the worst case, often 10-30x overall).
+
+### Size-tiered compaction (Cassandra default, HBase, RocksDB "universal")
+
+When enough SSTables of similar size accumulate (say 4), merge them into one bigger SSTable.
+
+```
+[1MB][1MB][1MB][1MB]        -> merge ->  [4MB]
+[4MB][4MB][4MB][4MB]        -> merge ->  [16MB]
+```
+
+- **Pros:** far lower write amplification, since each piece of data is rewritten far fewer times. Great for pure ingest workloads.
+- **Cons:** key ranges overlap across files, so reads may check many files; needs extra free disk space (temporarily up to 2x) during large merges.
+
+There are also specialised strategies such as **time-window compaction** for time-series data and **FIFO** compaction for caches and TTL data, where whole old files are simply deleted.
+
+---
+
+## 10. The three amplifications
+
+Every LSM tuning decision is a trade between three costs:
+
+| Amplification | Meaning | Hurt by |
+| --- | --- | --- |
+| **Write amplification** | Bytes physically written to disk per byte the user wrote | Aggressive/leveled compaction |
+| **Read amplification** | Disk reads (files/blocks touched) per lookup | Lazy compaction, many overlapping files |
+| **Space amplification** | Disk space used per byte of live data | Lazy compaction, obsolete versions and tombstones |
+
+You can't minimise all three at once (this is the idea behind the "RUM conjecture": Read, Update, Memory). Leveled compaction favours reads and space; size-tiered favours writes. Picking a compaction strategy is really picking which cost you can afford.
+
+---
+
+## 11. Backpressure: what happens when writes outrun compaction
+
+Background flushing and compaction have finite speed. If the incoming write rate exceeds what the disk can merge, SSTables (especially in L0) accumulate and reads degrade. Engines protect themselves with **write stalls**:
+
+1. **Slowdown:** when L0 file count or pending compaction bytes crosses a soft limit, writes are deliberately throttled.
+2. **Stop:** past a hard limit (or when too many immutable memtables are queued), writes block until compaction catches up.
+
+If you've ever seen mysterious latency spikes on a write-heavy RocksDB or Cassandra node, this is often the cause. Monitoring pending compactions and L0 file counts is essential.
+
+---
+
+## 12. A tiny LSM write path in pseudocode
+
+```python
+class LSM:
+    def put(self, key, value):
+        seq = self.next_seq()
+        self.wal.append(key, value, seq)       # 1. durability (sequential)
+        self.memtable.insert(key, value, seq)  # 2. skip-list insert in RAM
+
+        if self.memtable.size() >= MEMTABLE_LIMIT:
+            self.immutables.append(self.memtable)  # 3. freeze it
+            self.memtable = MemTable()             #    fresh one + new WAL
+            self.wal.rotate()
+            schedule(self.flush_oldest)            # 4. background flush
+
+    def get(self, key):
+        for table in [self.memtable, *reversed(self.immutables)]:
+            hit = table.lookup(key)
+            if hit: return None if hit.is_tombstone else hit.value
+        for sst in self.sstables_newest_first(key):
+            if not sst.bloom.might_contain(key): continue
+            hit = sst.lookup(key)
+            if hit: return None if hit.is_tombstone else hit.value
+        return None
+
+    def recover(self):
+        for record in self.wal.replay():       # after a crash
+            self.memtable.insert(*record)
+```
+
+Real systems add manifests (to track which SSTables are live), checksums, snapshots and careful concurrency, but the skeleton is exactly this.
+
+---
+
+## 13. Who uses this?
+
+- **LevelDB / RocksDB:** the canonical embedded LSM engines. RocksDB is used as the storage layer inside many other systems.
+- **Apache Cassandra and ScyllaDB:** distributed wide-column stores. Writes hit a commit log (the WAL) and a memtable, then flush to SSTables.
+- **Apache HBase:** WAL plus MemStore plus HFiles on HDFS.
+- **Many time-series and analytical engines:** ClickHouse's MergeTree family and several metrics databases use the same core idea of immutable sorted parts that are merged in the background.
+
+---
+
+## 14. When should you use an LSM-based database?
+
+**Good fit:**
+
+- High-ingest workloads: logs, metrics, events, messaging, IoT telemetry.
+- Workloads where most operations are inserts or blind overwrites, not read-modify-write.
+- Large datasets on SSDs where reducing random writes extends device lifetime.
+
+**Think twice if:**
+
+- You need predictable low-latency reads on huge datasets with heavy range scans (a B-tree may be steadier).
+- You do many point reads of non-existent keys (Bloom filters help but aren't free).
+- Your workload is dominated by in-place updates with strict latency SLAs, where compaction-induced spikes are hard to tolerate.
+
+---
+
+## 15. Key takeaways
+
+- Write-heavy databases win by **turning random writes into sequential writes**.
+- The **WAL** gives durability with one cheap sequential append.
+- The **memtable** (usually a **skip list**) absorbs writes in memory, keeps them sorted, and lets readers and writers run concurrently with minimal locking.
+- When full, it is flushed as an **immutable, sorted SSTable** with a sparse index and a Bloom filter.
+- **Tombstones** implement deletes; **compaction** merges files, reclaims space and keeps reads fast.
+- Everything is a trade-off between **write, read and space amplification**, so choose your compaction strategy to match your workload.
+
+Once you understand these five pieces (WAL, memtable, skip list, SSTable, compaction), you can read the architecture docs of almost any modern write-optimised database and recognise the same design underneath.
